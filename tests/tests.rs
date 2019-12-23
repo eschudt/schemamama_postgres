@@ -25,11 +25,11 @@ struct FirstMigration;
 migration!(FirstMigration, 10, "first migration");
 
 impl PostgresMigration for FirstMigration {
-    fn up(&self, transaction: &Transaction) -> Result<(), PostgresError> {
+    fn up(&self, transaction: &mut Transaction) -> Result<(), PostgresError> {
         transaction.execute("CREATE TABLE first (id BIGINT PRIMARY KEY);", &[]).map(|_| ())
     }
 
-    fn down(&self, transaction: &Transaction) -> Result<(), PostgresError> {
+    fn down(&self, transaction: &mut Transaction) -> Result<(), PostgresError> {
         transaction.execute("DROP TABLE first;", &[]).map(|_| ())
     }
 }
