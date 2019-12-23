@@ -2,11 +2,11 @@ extern crate schemamama;
 extern crate postgres;
 
 use postgres::error::Error as PostgresError;
-use postgres::transaction::Transaction;
+use postgres::{Client, Transaction};
 use schemamama::{Adapter, Migration, Version};
 use std::collections::BTreeSet;
 
-/// A migration to be used within a PostgreSQL connection.
+/// A migration to be used within a PostgreSQL client.
 pub trait PostgresMigration : Migration {
     /// Called when this migration is to be executed. This function has an empty body by default,
     /// so its implementation is optional.
@@ -23,74 +23,77 @@ pub trait PostgresMigration : Migration {
     }
 }
 
-/// An adapter that allows its migrations to act upon PostgreSQL connection transactions.
+/// An adapter that allows its migrations to act upon PostgreSQL client transactions.
 pub struct PostgresAdapter<'a> {
-    connection: &'a dyn postgres::GenericConnection,
+    client: &'a mut Client,
     metadata_table: &'static str,
 }
 
 impl<'a> PostgresAdapter<'a> {
-    /// Create a new migrator tied to a PostgreSQL connection.
-    pub fn new(connection: &'a dyn postgres::GenericConnection) -> PostgresAdapter<'a> {
-        Self::with_metadata_table(connection, "schemamama")
+    /// Create a new migrator tied to a PostgreSQL client.
+    pub fn new(client: &'a mut Client) -> PostgresAdapter<'a> {
+        Self::with_metadata_table(client, "schemamama")
     }
 
-    /// Create a new migrator tied to a PostgreSQL connection with custom metadata table name
+    /// Create a new migrator tied to a PostgreSQL client with custom metadata table name
     pub fn with_metadata_table(
-        connection: &'a dyn postgres::GenericConnection,
+        client: &'a mut Client,
         metadata_table: &'static str
     ) -> PostgresAdapter<'a> {
-        PostgresAdapter { connection, metadata_table }
+        PostgresAdapter { client, metadata_table }
     }
 
     /// Create the tables Schemamama requires to keep track of schema state. If the tables already
     /// exist, this function has no operation.
-    pub fn setup_schema(&self) -> Result<(), PostgresError> {
+    pub fn setup_schema(&mut self) -> Result<(), PostgresError> {
         let query = format!("CREATE TABLE IF NOT EXISTS {} (version BIGINT PRIMARY KEY);", self.metadata_table);
-        self.connection.execute(&query, &[]).map(|_| ())
+        let statement = self.client.prepare(&query)?;
+        self.client.execute(&statement, &[]).map(|_| ())
     }
+}
 
-    fn record_version(&self, version: Version) -> Result<(), PostgresError> {
-        let query = format!("INSERT INTO {} (version) VALUES ($1);", self.metadata_table);
-        self.connection.execute(&query, &[&version]).map(|_| ())
-    }
+fn record_version(transaction: &mut Transaction, version: Version, metadata_table: &str) -> Result<(), PostgresError> {
+    let query = format!("INSERT INTO {} (version) VALUES ($1);", metadata_table);
+    let statement = transaction.prepare(&query)?;
+    transaction.execute(&statement, &[&version]).map(|_| ())
+}
 
-    fn erase_version(&self, version: Version) -> Result<(), PostgresError> {
-        let query = format!("DELETE FROM {} WHERE version = $1;", self.metadata_table);
-        self.connection.execute(&query, &[&version]).map(|_| ())
-    }
+fn erase_version(transaction: &mut Transaction, version: Version, metadata_table: &str) -> Result<(), PostgresError> {
+    let query = format!("DELETE FROM {} WHERE version = $1;", metadata_table);
+    let statement = transaction.prepare(&query)?;
+    transaction.execute(&statement, &[&version]).map(|_| ())
 }
 
 impl<'a> Adapter for PostgresAdapter<'a> {
     type MigrationType = dyn PostgresMigration;
     type Error = PostgresError;
 
-    fn current_version(&self) -> Result<Option<Version>, PostgresError> {
+    fn current_version(&mut self) -> Result<Option<Version>, PostgresError> {
         let query = format!("SELECT version FROM {} ORDER BY version DESC LIMIT 1;", self.metadata_table);
-        let statement = self.connection.prepare(&query)?;
-        let row = statement.query(&[])?;
+        let statement = self.client.prepare(&query)?;
+        let row = self.client.query(&statement, &[])?;
         Ok(row.iter().next().map(|r| r.get(0)))
     }
 
-    fn migrated_versions(&self) -> Result<BTreeSet<Version>, PostgresError> {
+    fn migrated_versions(&mut self) -> Result<BTreeSet<Version>, PostgresError> {
         let query = format!("SELECT version FROM {};", self.metadata_table);
-        let statement = self.connection.prepare(&query)?;
-        let row = statement.query(&[])?;
+        let statement = self.client.prepare(&query)?;
+        let row = self.client.query(&statement, &[])?;
         Ok(row.iter().map(|r| r.get(0)).collect())
     }
 
-    fn apply_migration(&self, migration: &dyn PostgresMigration) -> Result<(), PostgresError> {
-        let mut transaction = self.connection.transaction()?;
+    fn apply_migration(&mut self, migration: &dyn PostgresMigration) -> Result<(), PostgresError> {
+        let mut transaction = self.client.transaction()?;
         migration.up(&mut transaction)?;
-        self.record_version(migration.version())?;
+        record_version(&mut transaction, migration.version(), self.metadata_table)?;
         transaction.commit()?;
         Ok(())
     }
 
-    fn revert_migration(&self, migration: &dyn PostgresMigration) -> Result<(), PostgresError> {
-        let mut transaction = self.connection.transaction()?;
+    fn revert_migration(&mut self, migration: &dyn PostgresMigration) -> Result<(), PostgresError> {
+        let mut transaction = self.client.transaction()?;
         migration.down(&mut transaction)?;
-        self.erase_version(migration.version())?;
+        erase_version(&mut transaction, migration.version(), self.metadata_table)?;
         transaction.commit()?;
         Ok(())
     }
