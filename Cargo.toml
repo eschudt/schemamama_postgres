@@ -10,4 +10,4 @@ repository = "https://github.com/eschudt/schemamama_postgres"
 
 [dependencies]
 schemamama = { git = "https://github.com/eschudt/schemamama" }
-postgres = "0.17.0-alpha.2"
+postgres = ">=0.17"
